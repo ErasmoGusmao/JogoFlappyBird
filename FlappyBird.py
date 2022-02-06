@@ -1,13 +1,18 @@
-# Jogo Flappy Brid
+# Jogo Flappy Brid conectada a IA
 # Aula: https://www.youtube.com/watch?v=WSPstecsF90
-# 04/02/2022
+# 06/02/2022
 
 import pygame
 import os
 import random
+# Biblioteca para rodar o algorítimo NEAT da rede neural
+import neat
 
+# Variáveis globais para uso da IA (NÃO É RECOMENDADO FAZER DESSA FORMA)
+ai_jogando = True   # Módulo de jogo:  True - ( IA joga); False - ( Usuário joga)
+geracao = 0         # Geração inicial da IA
 
-# Constantes
+# Constantes da janela do jogo
 TELA_LARGURA = 500
 TELA_ALTURA = 800
 
@@ -191,11 +196,33 @@ def desenhar_tela(tela, passaros, canos, chao, pontos):
 
     texto = FONTE_PONTOS.render(f"Pontuação: {pontos}", 1, (255, 255, 255))
     tela.blit(texto, (TELA_LARGURA - 10 - texto.get_width(), 10))
+
+    # Informa na pela a geração da IA
+    if ai_jogando:
+        texto = FONTE_PONTOS.render(f"Geração: {geracao}", 1, (255, 255, 255))
+        tela.blit(texto, (10, 10))
+
     chao.desenhar(tela)
     pygame.display.update()
 
-def main():
-    passaros = [Passaro(230, 350)]
+def main(genomas, config_AI): # fitness function
+    #Contador que indica quantas vezes a IA iniciaou o jogo
+    global geracao  # geracao é uma variável global
+    geracao += 1
+
+    if ai_jogando:
+        # Criar vários pássaros
+        passaros = []
+        redes = [] # lista de redes neurais que usará as configurações da lista_genoma
+        lista_genomas = [] # Lista relativa as configurações do genoma da rede neura
+        for _, genoma in genomas:   # genomas é uma lista de túplas (IDGenema, genoma), como não quero pegar o IDGenoma, eu uso o '_' o FOR
+            rede = neat.nn.FeedForwardNetwork.create(genoma, config_AI)  # Criando a rede neural
+            redes.append(rede)
+            genoma.fitness = 0 # pontuação para treinar a rede neural (incentívos)
+            lista_genomas.append(genoma)
+            passaros.append(Passaro(230, 350))
+    else:
+        passaros = [Passaro(230, 350)]
     chao = Chao(730)
     canos = [Cano(700)]
     tela = pygame.display.set_mode((TELA_LARGURA, TELA_ALTURA))
@@ -212,14 +239,33 @@ def main():
                 rodando = False
                 pygame.quit()
                 quit()
-            if evento.type == pygame.KEYDOWN: # Verifica se ocorreu algum evento no tecado
-                if evento.key == pygame.K_SPACE: # Se o evento foi a barra de espaço (pygame.K_ESCAPE = Esc)
-                    for passaro in passaros:
-                        passaro.pular()
+            if not ai_jogando:
+                if evento.type == pygame.KEYDOWN: # Verifica se ocorreu algum evento no tecado
+                    if evento.key == pygame.K_SPACE: # Se o evento foi a barra de espaço (pygame.K_ESCAPE = Esc)
+                        for passaro in passaros:
+                            passaro.pular()
+
+        indice_cano = 0
+        if len(passaros) > 0: # se ainda tiver passaro na lista
+            # descobrir qual cano olhar
+            if len(canos) > 1 and passaros[0].x > (canos[0].x + canos[0].CANO_TOPO.get_width()):
+                indice_cano = 1
+        else: # todos os pássaros morreram
+            rodando = False
+            break
 
         # Mover os objetos do jogo
-        for passaro in passaros:
+        for i, passaro in enumerate(passaros):
             passaro.mover()
+            if ai_jogando:
+                # aumentar um pouco a fitness do pássaro
+                lista_genomas[i].fitness += 0.1
+                output = redes[i].activate((passaro.y,
+                                            abs(passaro.y - canos[indice_cano].altura),
+                                            abs(passaro.y - canos[indice_cano].pos_base))) #.activate((input1, input2, input3))
+                # -1 e 1 -> se o output for > 0,5 o pássaro pula
+                if output[0] > 0.5:
+                    passaro.pular()
         chao.mover()
 
         adicioar_cano = False
@@ -228,6 +274,10 @@ def main():
             for i, passaro in enumerate(passaros):
                 if cano.colidir(passaro):   # Se o passaro colidiu com o cano
                     passaros.pop(i) # Retiro meu pássaro que morreu da lista de pássaros
+                    if ai_jogando:
+                        lista_genomas[i].fitness -= 1
+                        lista_genomas.pop(i)
+                        redes.pop(i)
                 if not cano.passou and passaro.x > cano.x:  # Por defiição cano.passou = False, mas se o pássarou passou do cano, então atualiza
                     cano.passou = True
                     adicioar_cano = True
@@ -238,14 +288,40 @@ def main():
         if adicioar_cano:
             pontos += 1
             canos.append(Cano(600))
+            if ai_jogando:
+                for genoma in lista_genomas:
+                    genoma.fitness += 5
         for cano in remover_canos:
             canos.remove(cano)
 
         for i, passaro in enumerate(passaros):  # Verificar se ele colidiu com o topo da tela ou o chão
             if(passaro.y + passaro.imagem.get_height()) > chao.y or passaro.y < 0:
                 passaros.pop(i) # Remove o pássaro da lista
+                if ai_jogando:
+                    lista_genomas.pop(i)
+                    redes.pop(i)
 
         desenhar_tela(tela, passaros, canos, chao, pontos)
 
+def rodar(caminho_config_IA): # Onde será configurada a IA ( pegar o gonfig ) e chamar a main()
+    config = neat.config.Config(neat.DefaultGenome,
+                                neat.DefaultReproduction,
+                                neat.DefaultSpeciesSet,
+                                neat.DefaultStagnation,
+                                caminho_config_IA)
+
+    populacao = neat.Population(config)
+
+    ##### ESTATÍSTICAS DO RESULTADO DO APRENDIZADO####
+    populacao.add_reporter(neat.StdOutReporter(True))
+    populacao.add_reporter(neat.StatisticsReporter())
+
+    if ai_jogando:
+        populacao.run(main, 50) # Rodar a main por 50 geração. Se não usasse nada, ele iria para no que foi determina do o arquivo config_IA
+    else:
+        main(None, None)
+
 if __name__ == '__main__':
-    main()
+    caminho = os.path.dirname(__file__)
+    caminho_config_IA = 'config_IA.txt'
+    rodar(caminho_config_IA)
